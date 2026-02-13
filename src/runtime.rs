@@ -1268,7 +1268,7 @@ impl RuntimeIntervals {
         let mut metrics = RuntimeMetrics {
             workers_count: self.runtime.num_workers(),
             live_tasks_count: self.runtime.num_alive_tasks(),
-            elapsed: now - self.started_at,
+            elapsed: now.saturating_duration_since(self.started_at),
             global_queue_depth: self.runtime.global_queue_depth(),
             min_park_count: u64::MAX,
             min_busy_duration: Duration::from_secs(1000000000),

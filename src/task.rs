@@ -1877,8 +1877,8 @@ impl RawMetrics {
         let total_slow_poll_duration =
             Duration::from_nanos(self.total_slow_poll_duration.load(SeqCst));
 
-        let total_poll_count = total_fast_poll_count + total_slow_poll_count;
-        let total_poll_duration = total_fast_poll_duration + total_slow_poll_duration;
+        let total_poll_count = total_fast_poll_count.saturating_add(total_slow_poll_count);
+        let total_poll_duration = total_fast_poll_duration.saturating_add(total_slow_poll_duration);
 
         TaskMetrics {
             instrumented_count: self.instrumented_count.load(SeqCst),
@@ -2458,7 +2458,8 @@ fn instrument_poll<T, Out>(
         /* 2. account for the time-to-first-poll of this task */
         // if the time-to-first-poll of this task exceeds `u64::MAX` ns,
         // round down to `u64::MAX` nanoseconds
-        let elapsed = (poll_start - instrumented_at)
+        let elapsed = poll_start
+            .saturating_duration_since(instrumented_at)
             .as_nanos()
             .try_into()
             .unwrap_or(u64::MAX);
@@ -2478,7 +2479,7 @@ fn instrument_poll<T, Out>(
         metrics.total_idled_count.fetch_add(1, SeqCst);
 
         // compute the duration of the idle
-        let idle_ns = woke_at - *idled_at;
+        let idle_ns = woke_at.saturating_sub(*idled_at);
 
         // update the max time tasks spent idling, both locally and
         // globally.
@@ -2500,11 +2501,14 @@ fn instrument_poll<T, Out>(
         // recall that the `woke_at` field is internally represented as
         // nanoseconds-since-instrumentation. here, for accounting purposes,
         // we need to instead represent it as a proper `Instant`.
-        let woke_instant = instrumented_at + Duration::from_nanos(woke_at);
+        let woke_instant = instrumented_at
+            .checked_add(Duration::from_nanos(woke_at))
+            .unwrap_or(poll_start);
 
         // the duration this task spent scheduled is time time elapsed between
         // when this task was awoke, and when it was polled.
-        let scheduled_ns = (poll_start - woke_instant)
+        let scheduled_ns = poll_start
+            .saturating_duration_since(woke_instant)
             .as_nanos()
             .try_into()
             .unwrap_or(u64::MAX);
@@ -2536,12 +2540,13 @@ fn instrument_poll<T, Out>(
     let ret = poll_fn(this.task, &mut cx);
     let inner_poll_end = Instant::now();
     /* idle time starts now */
-    *idled_at = (inner_poll_end - instrumented_at)
+    *idled_at = inner_poll_end
+        .saturating_duration_since(instrumented_at)
         .as_nanos()
         .try_into()
         .unwrap_or(u64::MAX);
     /* accounting for poll time */
-    let inner_poll_duration = inner_poll_end - inner_poll_start;
+    let inner_poll_duration = inner_poll_end.saturating_duration_since(inner_poll_start);
     let inner_poll_ns: u64 = inner_poll_duration
         .as_nanos()
         .try_into()

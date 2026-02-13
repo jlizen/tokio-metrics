@@ -1,4 +1,5 @@
 #![warn(
+    clippy::arithmetic_side_effects,
     missing_debug_implementations,
     missing_docs,
     rust_2018_idioms,
