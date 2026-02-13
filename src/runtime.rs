@@ -1268,7 +1268,7 @@ impl RuntimeIntervals {
         let mut metrics = RuntimeMetrics {
             workers_count: self.runtime.num_workers(),
             live_tasks_count: self.runtime.num_alive_tasks(),
-            elapsed: now - self.started_at,
+            elapsed: now.saturating_duration_since(self.started_at),
             global_queue_depth: self.runtime.global_queue_depth(),
             min_park_count: u64::MAX,
             min_busy_duration: Duration::from_secs(1000000000),
@@ -1281,7 +1281,7 @@ impl RuntimeIntervals {
             let budget_forced_yields = self.runtime.budget_forced_yield_count();
             let io_driver_ready_events = self.runtime.io_driver_ready_count();
 
-            metrics.num_remote_schedules = num_remote_schedules - self.num_remote_schedules;
+            metrics.num_remote_schedules = num_remote_schedules.saturating_sub(self.num_remote_schedules);
             metrics.min_noop_count = u64::MAX;
             metrics.min_steal_count = u64::MAX;
             metrics.min_local_schedule_count = u64::MAX;
@@ -1291,8 +1291,8 @@ impl RuntimeIntervals {
             metrics.mean_poll_duration_worker_min = Duration::MAX;
             metrics.poll_time_histogram = vec![0; self.runtime.poll_time_histogram_num_buckets()];
             metrics.budget_forced_yield_count =
-                budget_forced_yields - self.budget_forced_yield_count;
-            metrics.io_driver_ready_count = io_driver_ready_events - self.io_driver_ready_count;
+                budget_forced_yields.saturating_sub(self.budget_forced_yield_count);
+            metrics.io_driver_ready_count = io_driver_ready_events.saturating_sub(self.io_driver_ready_count);
 
             self.num_remote_schedules = num_remote_schedules;
             self.budget_forced_yield_count = budget_forced_yields;
@@ -1506,7 +1506,7 @@ impl Worker {
             );
 
             // Get the number of polls since last probe
-            worker_polls_count = self.total_polls_count - worker_polls_count;
+            worker_polls_count = self.total_polls_count.saturating_sub(worker_polls_count);
 
             // Update the mean task poll duration if there were polls
             if worker_polls_count > 0 {
@@ -1535,16 +1535,16 @@ impl Worker {
             if worker_polls_count > 0 {
                 for (bucket, cell) in metrics.poll_time_histogram.iter_mut().enumerate() {
                     let new = rt.poll_time_histogram_bucket_count(self.worker, bucket);
-                    let delta = new - self.poll_time_histogram[bucket];
+                    let delta = new.saturating_sub(self.poll_time_histogram[bucket]);
                     self.poll_time_histogram[bucket] = new;
 
-                    *cell += delta;
+                    *cell = cell.saturating_add(delta);
                 }
             }
 
             // Local scheduled tasks is an absolute value
             let local_scheduled_tasks = rt.worker_local_queue_depth(self.worker);
-            metrics.total_local_queue_depth += local_scheduled_tasks;
+            metrics.total_local_queue_depth = metrics.total_local_queue_depth.saturating_add(local_scheduled_tasks);
 
             if local_scheduled_tasks > metrics.max_local_queue_depth {
                 metrics.max_local_queue_depth = local_scheduled_tasks;
@@ -1574,7 +1574,7 @@ derived_metrics!(
         unstable {
             /// Returns the ratio of the [`RuntimeMetrics::total_polls_count`] to the [`RuntimeMetrics::total_noop_count`].
             pub fn mean_polls_per_park(&self) -> f64 {
-                let total_park_count = self.total_park_count - self.total_noop_count;
+                let total_park_count = self.total_park_count.saturating_sub(self.total_noop_count);
                 if total_park_count == 0 {
                     0.0
                 } else {
