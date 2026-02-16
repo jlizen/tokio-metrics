@@ -1,3 +1,22 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.4.8](https://github.com/tokio-rs/tokio-metrics/compare/v0.4.7...v0.4.8) - 2026-02-16
+
+### Added
+
+- publicly export task `TaskIntervals` type ([#112](https://github.com/tokio-rs/tokio-metrics/pull/112))
+
+### Fixed
+
+- use saturating_sub to prevent overflow panics in runtime metrics ([#114](https://github.com/tokio-rs/tokio-metrics/pull/114))
+
 # 0.4.7 (January 15, 2025)
 - docs: fix typos in `TaskMetrics` ([#103])
 - rt: integrate derived metrics with metrics.rs ([#104])
