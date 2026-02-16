@@ -1,3 +1,18 @@
+## Doing releases
+
+There is a `.github/workflows/release.yml` workflow that will publish a crates.io release and create a GitHub release every time the version in `Cargo.toml` changes on `main`. The workflow is authorized to publish via [trusted publishing](https://rust-lang.github.io/rfcs/3691-trusted-publishing-cratesio.html), no further authorization is needed.
+
+To prepare a release, use [conventional commits](https://www.conventionalcommits.org/en/v1.0.0/), and in a clean git repo run:
+
+```
+cargo install release-plz --locked
+git checkout main && release-plz update
+# review the changes to Cargo.toml and CHANGELOG.md
+git commit -a
+```
+
+Then open a PR for the release and get it approved. Once merged, the release workflow will automatically publish to crates.io and create a GitHub release.
+
 ## How to test docs.rs changes
 
 Set up your local docs.rs environment as per official README:  
