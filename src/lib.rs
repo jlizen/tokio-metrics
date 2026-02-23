@@ -134,8 +134,6 @@ async fn do_work() {
 //! ```
 //! use std::time::Duration;
 //!
-//! use metrics::Key;
-//!
 //! #[tokio::main]
 //! async fn main() {
 //!     metrics_exporter_prometheus::PrometheusBuilder::new()
@@ -143,7 +141,7 @@ async fn do_work() {
 //!         .install()
 //!         .unwrap();
 #![cfg_attr(
-    feature = "rt",
+    all(feature = "rt", feature = "metrics-rs-integration"),
     doc = r##"
     // This line launches the runtime reporter that monitors the Tokio runtime and exports the metrics.
     tokio::task::spawn(
@@ -152,14 +150,20 @@ async fn do_work() {
 "##
 )]
 //!     let monitor = tokio_metrics::TaskMonitor::new();
-//!     // This line launches the task reporter that monitors Tokio tasks and exports the metrics.
-//!     tokio::task::spawn(
-//!         tokio_metrics::TaskMetricsReporterBuilder::new(|name| {
-//!             let name = name.replacen("tokio_", "my_task_", 1);
-//!             Key::from_parts(name, &[("application", "my_app")])
-//!         })
-//!         .describe_and_run(monitor.clone()),
-//!     );
+#![cfg_attr(
+    all(feature = "rt", feature = "metrics-rs-integration"),
+    doc = r##"
+    use metrics::Key;
+    // This line launches the task reporter that monitors Tokio tasks and exports the metrics.
+    tokio::task::spawn(
+        tokio_metrics::TaskMetricsReporterBuilder::new(|name| {
+            let name = name.replacen("tokio_", "my_task_", 1);
+            Key::from_parts(name, &[("application", "my_app")])
+        })
+        .describe_and_run(monitor.clone()),
+    );
+"##
+)]
 //!     // Run some code.
 //!     tokio::task::spawn(monitor.instrument(async move {
 //!         for _ in 0..1000 {
@@ -198,15 +202,12 @@ cfg_rt! {
 pub use runtime::metrics_rs_integration::{RuntimeMetricsReporter, RuntimeMetricsReporterBuilder};
 
 mod derived_metrics;
-#[cfg(all(feature = "rt", feature = "metrics-rs-integration"))]
+#[cfg(feature = "metrics-rs-integration")]
 mod metrics_rs;
 mod task;
 
-#[cfg(all(feature = "rt", feature = "metrics-rs-integration"))]
-#[cfg_attr(
-    docsrs,
-    doc(cfg(all(feature = "rt", feature = "metrics-rs-integration")))
-)]
+#[cfg(feature = "metrics-rs-integration")]
+#[cfg_attr(docsrs, doc(cfg(feature = "metrics-rs-integration")))]
 pub use task::metrics_rs_integration::{TaskMetricsReporter, TaskMetricsReporterBuilder};
 pub use task::{
     Instrumented, TaskIntervals, TaskMetrics, TaskMonitor, TaskMonitorCore, TaskMonitorCoreBuilder,
