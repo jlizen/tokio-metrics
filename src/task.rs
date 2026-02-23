@@ -1,6 +1,7 @@
 use futures_util::task::{ArcWake, AtomicWaker};
 use pin_project_lite::pin_project;
 use std::future::Future;
+use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::sync::Arc;
@@ -18,6 +19,9 @@ use std::time::{Duration, Instant};
 pub(crate) mod metrics_rs_integration;
 
 /// Monitors key metrics of instrumented tasks.
+///
+/// This struct is preferred for generating a variable number of monitors at runtime.
+/// If you can construct a fixed count of `static` monitors instead, see [`TaskMonitorCore`].
 ///
 /// ### Basic Usage
 /// A [`TaskMonitor`] tracks key [metrics][TaskMetrics] of async tasks that have been
@@ -515,20 +519,141 @@ pub(crate) mod metrics_rs_integration;
 /// its interval-sampled counterpart will also overflow.
 #[derive(Clone, Debug)]
 pub struct TaskMonitor {
-    metrics: Arc<RawMetrics>,
+    base: Arc<TaskMonitorCore>,
+}
+
+impl Deref for TaskMonitor {
+    type Target = TaskMonitorCore;
+
+    fn deref(&self) -> &Self::Target {
+        &self.base
+    }
+}
+
+impl AsRef<TaskMonitorCore> for TaskMonitor {
+    fn as_ref(&self) -> &TaskMonitorCore {
+        &self.base
+    }
+}
+
+/// A non-`Clone`, non-allocated, static-friendly version of [`TaskMonitor`].
+/// See full docs on the [`TaskMonitor`] struct.
+///
+/// You should use [`TaskMonitorCore`] if you have a known count of monitors
+/// that you want to initialize as compile-time `static` structs.
+///
+/// You can also use [`TaskMonitorCore`] if you are already passing around an `Arc`-wrapped
+/// struct that you want to store your monitor in. This way, you can avoid double-`Arc`'ing it.
+///
+/// For other most other non-static usage, [`TaskMonitor`] will be more ergonomic.
+///
+/// ##### Examples
+///
+/// Static usage:
+/// ```
+/// use tokio_metrics::TaskMonitorCore;
+///
+/// static MONITOR: TaskMonitorCore = TaskMonitorCore::new();
+///
+/// #[tokio::main]
+/// async fn main() {
+///     assert_eq!(MONITOR.cumulative().first_poll_count, 0);
+///
+///     MONITOR.instrument(async {}).await;
+///     assert_eq!(MONITOR.cumulative().first_poll_count, 1);
+/// }
+/// ```
+///
+/// Usage with wrapper struct and [`TaskMonitorCore::instrument_with`]:
+/// ```
+/// use std::sync::Arc;
+/// use tokio_metrics::TaskMonitorCore;
+///
+/// #[derive(Clone)]
+/// struct SharedState(Arc<SharedStateInner>);
+/// struct SharedStateInner {
+///     monitor: TaskMonitorCore,
+///     other_state: SomeOtherSharedState,
+/// }
+/// /// Imagine: a type that wasn't `Clone` that you want to pass around
+/// /// in a similar way as the monitor
+/// struct SomeOtherSharedState;
+///
+/// impl AsRef<TaskMonitorCore> for SharedState {
+///     fn as_ref(&self) -> &TaskMonitorCore {
+///         &self.0.monitor
+///     }
+/// }
+///
+/// #[tokio::main]
+/// async fn main() {
+///     let state = SharedState(Arc::new(SharedStateInner {
+///         monitor: TaskMonitorCore::new(),
+///         other_state: SomeOtherSharedState,
+///     }));
+///
+///     assert_eq!(state.0.monitor.cumulative().first_poll_count, 0);
+///
+///     TaskMonitorCore::instrument_with(async {}, state.clone()).await;
+///     assert_eq!(state.0.monitor.cumulative().first_poll_count, 1);
+/// }
+/// ```
+#[derive(Debug)]
+pub struct TaskMonitorCore {
+    metrics: RawMetrics,
 }
 
 /// Provides an interface for constructing a [`TaskMonitor`] with specialized configuration
 /// parameters.
 #[derive(Clone, Debug, Default)]
-pub struct TaskMonitorBuilder {
-    slow_poll_threshold: Option<Duration>,
-    long_delay_threshold: Option<Duration>,
-}
+pub struct TaskMonitorBuilder(TaskMonitorCoreBuilder);
 
 impl TaskMonitorBuilder {
     /// Creates a new [`TaskMonitorBuilder`].
     pub fn new() -> Self {
+        Self(TaskMonitorCoreBuilder::new())
+    }
+
+    /// Specifies the threshold at which polls are considered 'slow'.
+    pub fn with_slow_poll_threshold(&mut self, threshold: Duration) -> &mut Self {
+        self.0.slow_poll_threshold = Some(threshold);
+        self
+    }
+
+    /// Specifies the threshold at which schedules are considered 'long'.
+    pub fn with_long_delay_threshold(&mut self, threshold: Duration) -> &mut Self {
+        self.0.long_delay_threshold = Some(threshold);
+        self
+    }
+
+    /// Consume the builder, producing a [`TaskMonitor`].
+    pub fn build(self) -> TaskMonitor {
+        TaskMonitor {
+            base: Arc::new(self.0.build()),
+        }
+    }
+}
+
+/// Provides an interface for constructing a [`TaskMonitorCore`] with specialized configuration
+/// parameters.
+///
+/// ```
+/// use std::time::Duration;
+/// use tokio_metrics::TaskMonitorCoreBuilder;
+///
+/// static MONITOR: tokio_metrics::TaskMonitorCore = TaskMonitorCoreBuilder::new()
+///     .with_slow_poll_threshold(Duration::from_micros(100))
+///     .build();
+/// ```
+#[derive(Clone, Debug, Default)]
+pub struct TaskMonitorCoreBuilder {
+    slow_poll_threshold: Option<Duration>,
+    long_delay_threshold: Option<Duration>,
+}
+
+impl TaskMonitorCoreBuilder {
+    /// Creates a new [`TaskMonitorCoreBuilder`].
+    pub const fn new() -> Self {
         Self {
             slow_poll_threshold: None,
             long_delay_threshold: None,
@@ -536,34 +661,39 @@ impl TaskMonitorBuilder {
     }
 
     /// Specifies the threshold at which polls are considered 'slow'.
-    pub fn with_slow_poll_threshold(&mut self, threshold: Duration) -> &mut Self {
-        self.slow_poll_threshold = Some(threshold);
-
-        self
+    pub const fn with_slow_poll_threshold(self, threshold: Duration) -> Self {
+        Self {
+            slow_poll_threshold: Some(threshold),
+            ..self
+        }
     }
 
     /// Specifies the threshold at which schedules are considered 'long'.
-    pub fn with_long_delay_threshold(&mut self, threshold: Duration) -> &mut Self {
-        self.long_delay_threshold = Some(threshold);
-
-        self
+    pub const fn with_long_delay_threshold(self, threshold: Duration) -> Self {
+        Self {
+            long_delay_threshold: Some(threshold),
+            ..self
+        }
     }
 
-    /// Consume the builder, producing a [`TaskMonitor`].
-    pub fn build(self) -> TaskMonitor {
-        TaskMonitor::create(
-            self.slow_poll_threshold
-                .unwrap_or(TaskMonitor::DEFAULT_SLOW_POLL_THRESHOLD),
-            self.long_delay_threshold
-                .unwrap_or(TaskMonitor::DEFAULT_LONG_DELAY_THRESHOLD),
-        )
+    /// Consume the builder, producing a [`TaskMonitorCore`].
+    pub const fn build(self) -> TaskMonitorCore {
+        let slow = match self.slow_poll_threshold {
+            Some(v) => v,
+            None => TaskMonitor::DEFAULT_SLOW_POLL_THRESHOLD,
+        };
+        let long = match self.long_delay_threshold {
+            Some(v) => v,
+            None => TaskMonitor::DEFAULT_LONG_DELAY_THRESHOLD,
+        };
+        TaskMonitorCore::create(slow, long)
     }
 }
 
 pin_project! {
     /// An async task that has been instrumented with [`TaskMonitor::instrument`].
     #[derive(Debug)]
-    pub struct Instrumented<T> {
+    pub struct Instrumented<T, M: AsRef<TaskMonitorCore> = TaskMonitor> {
         // The task being instrumented
         #[pin]
         task: T,
@@ -576,12 +706,12 @@ pin_project! {
         idled_at: u64,
 
         // State shared between the task and its instrumented waker.
-        state: Arc<State>,
+        state: Arc<State<M>>,
     }
 
-    impl<T> PinnedDrop for Instrumented<T> {
+    impl<T, M: AsRef<TaskMonitorCore>> PinnedDrop for Instrumented<T, M> {
         fn drop(this: Pin<&mut Self>) {
-            this.state.metrics.dropped_count.fetch_add(1, SeqCst);
+            this.state.monitor.as_ref().metrics.dropped_count.fetch_add(1, SeqCst);
         }
     }
 }
@@ -1510,9 +1640,9 @@ struct RawMetrics {
 }
 
 #[derive(Debug)]
-struct State {
+struct State<M> {
     /// Where metrics should be recorded
-    metrics: Arc<RawMetrics>,
+    monitor: M,
 
     /// Instant at which the task was instrumented. This is used to track the time to first poll.
     instrumented_at: Instant,
@@ -1604,33 +1734,9 @@ impl TaskMonitor {
     /// }
     /// ```
     pub fn with_slow_poll_threshold(slow_poll_cut_off: Duration) -> TaskMonitor {
-        Self::create(slow_poll_cut_off, Self::DEFAULT_LONG_DELAY_THRESHOLD)
-    }
-
-    fn create(slow_poll_cut_off: Duration, long_delay_cut_off: Duration) -> TaskMonitor {
+        let base = TaskMonitorCore::create(slow_poll_cut_off, Self::DEFAULT_LONG_DELAY_THRESHOLD);
         TaskMonitor {
-            metrics: Arc::new(RawMetrics {
-                slow_poll_threshold: slow_poll_cut_off,
-                first_poll_count: AtomicU64::new(0),
-                total_idled_count: AtomicU64::new(0),
-                total_scheduled_count: AtomicU64::new(0),
-                total_fast_poll_count: AtomicU64::new(0),
-                total_slow_poll_count: AtomicU64::new(0),
-                total_long_delay_count: AtomicU64::new(0),
-                instrumented_count: AtomicU64::new(0),
-                dropped_count: AtomicU64::new(0),
-                total_first_poll_delay_ns: AtomicU64::new(0),
-                total_scheduled_duration_ns: AtomicU64::new(0),
-                local_max_idle_duration_ns: AtomicU64::new(0),
-                global_max_idle_duration_ns: AtomicU64::new(0),
-                total_idle_duration_ns: AtomicU64::new(0),
-                total_fast_poll_duration_ns: AtomicU64::new(0),
-                total_slow_poll_duration: AtomicU64::new(0),
-                total_short_delay_duration_ns: AtomicU64::new(0),
-                long_delay_threshold: long_delay_cut_off,
-                total_short_delay_count: AtomicU64::new(0),
-                total_long_delay_duration_ns: AtomicU64::new(0),
-            }),
+            base: Arc::new(base),
         }
     }
 
@@ -1653,13 +1759,13 @@ impl TaskMonitor {
     /// }
     /// ```
     pub fn slow_poll_threshold(&self) -> Duration {
-        self.metrics.slow_poll_threshold
+        self.base.metrics.slow_poll_threshold
     }
 
     /// Produces the duration greater-than-or-equal-to at which scheduling delays are categorized
     /// as long.
     pub fn long_delay_threshold(&self) -> Duration {
-        self.metrics.long_delay_threshold
+        self.base.metrics.long_delay_threshold
     }
 
     /// Produces an instrumented façade around a given async task.
@@ -1724,18 +1830,7 @@ impl TaskMonitor {
     /// }
     /// ```
     pub fn instrument<F>(&self, task: F) -> Instrumented<F> {
-        self.metrics.instrumented_count.fetch_add(1, SeqCst);
-        Instrumented {
-            task,
-            did_poll_once: false,
-            idled_at: 0,
-            state: Arc::new(State {
-                metrics: self.metrics.clone(),
-                instrumented_at: Instant::now(),
-                woke_at: AtomicU64::new(0),
-                waker: AtomicWaker::new(),
-            }),
-        }
+        TaskMonitorCore::instrument_with(task, self.clone())
     }
 
     /// Produces [`TaskMetrics`] for the tasks instrumented by this [`TaskMonitor`], collected since
@@ -1796,7 +1891,7 @@ impl TaskMonitor {
     /// }
     /// ```
     pub fn cumulative(&self) -> TaskMetrics {
-        self.metrics.metrics()
+        self.base.metrics.metrics()
     }
 
     /// Produces an unending iterator of metric sampling intervals.
@@ -1857,8 +1952,211 @@ impl TaskMonitor {
     /// ```
     pub fn intervals(&self) -> TaskIntervals {
         TaskIntervals {
-            metrics: self.metrics.clone(),
+            monitor: self.clone(),
             previous: None,
+        }
+    }
+}
+
+impl TaskMonitorCore {
+    /// Returns a const-friendly [`TaskMonitorCoreBuilder`].
+    pub const fn builder() -> TaskMonitorCoreBuilder {
+        TaskMonitorCoreBuilder::new()
+    }
+
+    /// Constructs a new [`TaskMonitorCore`]. Refer to the struct documentation for more discussion
+    /// of benefits compared to [`TaskMonitor`].
+    ///
+    /// Uses [`TaskMonitor::DEFAULT_SLOW_POLL_THRESHOLD`] as the threshold at which polls will be
+    /// considered 'slow'.
+    ///
+    /// Uses [`TaskMonitor::DEFAULT_LONG_DELAY_THRESHOLD`] as the threshold at which scheduling will be
+    /// considered 'long'.
+    pub const fn new() -> TaskMonitorCore {
+        TaskMonitorCore::with_slow_poll_threshold(TaskMonitor::DEFAULT_SLOW_POLL_THRESHOLD)
+    }
+
+    /// Constructs a new task monitor with a given threshold at which polls are considered 'slow'.
+    ///
+    /// Refer to [`TaskMonitor::with_slow_poll_threshold`] for examples.
+    pub const fn with_slow_poll_threshold(slow_poll_cut_off: Duration) -> TaskMonitorCore {
+        Self::create(slow_poll_cut_off, TaskMonitor::DEFAULT_LONG_DELAY_THRESHOLD)
+    }
+
+    /// Produces the duration greater-than-or-equal-to at which polls are categorized as slow.
+    ///
+    /// Refer to [`TaskMonitor::slow_poll_threshold`] for examples.
+    pub fn slow_poll_threshold(&self) -> Duration {
+        self.metrics.slow_poll_threshold
+    }
+
+    /// Produces the duration greater-than-or-equal-to at which scheduling delays are categorized
+    /// as long.
+    pub fn long_delay_threshold(&self) -> Duration {
+        self.metrics.long_delay_threshold
+    }
+
+    /// Produces an instrumented façade around a given async task.
+    ///
+    /// ##### Examples
+    /// ```
+    /// use tokio_metrics::TaskMonitorCore;
+    ///
+    /// static MONITOR: TaskMonitorCore = TaskMonitorCore::new();
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     assert_eq!(MONITOR.cumulative().first_poll_count, 0);
+    ///
+    ///     MONITOR.instrument(async {}).await;
+    ///     assert_eq!(MONITOR.cumulative().first_poll_count, 1);
+    /// }
+    /// ```
+    pub fn instrument<F>(&'static self, task: F) -> Instrumented<F, &'static Self> {
+        Self::instrument_with(task, self)
+    }
+
+    /// Produces an instrumented façade around a given async task, with an explicit monitor.
+    ///
+    /// Use this when you have a non-static monitor reference, such as an `Arc<TaskMonitorCore>`.
+    ///
+    /// ##### Examples
+    /// ```
+    /// use std::sync::Arc;
+    /// use tokio_metrics::TaskMonitorCore;
+    ///
+    /// #[derive(Clone)]
+    /// struct SharedState(Arc<SharedStateInner>);
+    /// struct SharedStateInner {
+    ///     monitor: TaskMonitorCore,
+    ///     other_state: SomeOtherSharedState,
+    /// }
+    /// /// Imagine: a type that wasn't `Clone` that you want to pass around
+    /// /// in a similar way as the monitor
+    /// struct SomeOtherSharedState;
+    ///
+    /// impl AsRef<TaskMonitorCore> for SharedState {
+    ///     fn as_ref(&self) -> &TaskMonitorCore {
+    ///         &self.0.monitor
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let state = SharedState(Arc::new(SharedStateInner {
+    ///         monitor: TaskMonitorCore::new(),
+    ///         other_state: SomeOtherSharedState,
+    ///     }));
+    ///
+    ///     assert_eq!(state.0.monitor.cumulative().first_poll_count, 0);
+    ///
+    ///     TaskMonitorCore::instrument_with(async {}, state.clone()).await;
+    ///     assert_eq!(state.0.monitor.cumulative().first_poll_count, 1);
+    /// }
+    /// ```
+    pub fn instrument_with<F, M: AsRef<TaskMonitorCore> + Send + Sync + 'static>(
+        task: F,
+        monitor: M,
+    ) -> Instrumented<F, M> {
+        monitor
+            .as_ref()
+            .metrics
+            .instrumented_count
+            .fetch_add(1, SeqCst);
+
+        let state: State<M> = State {
+            monitor,
+            instrumented_at: Instant::now(),
+            woke_at: AtomicU64::new(0),
+            waker: AtomicWaker::new(),
+        };
+
+        let instrumented: Instrumented<F, M> = Instrumented {
+            task,
+            did_poll_once: false,
+            idled_at: 0,
+            state: Arc::new(state),
+        };
+
+        instrumented
+    }
+
+    /// Produces [`TaskMetrics`] for the tasks instrumented by this [`TaskMonitorCore`], collected since
+    /// the construction of [`TaskMonitorCore`].
+    ///
+    /// ##### See also
+    /// - [`TaskMonitorCore::intervals`]:
+    ///   produces [`TaskMetrics`] for user-defined sampling intervals, instead of cumulatively
+    ///
+    /// See [`TaskMonitor::cumulative`] for examples.
+    pub fn cumulative(&self) -> TaskMetrics {
+        self.metrics.metrics()
+    }
+
+    /// Produces an unending iterator of metric sampling intervals.
+    ///
+    /// Each sampling interval is defined by the time elapsed between advancements of the iterator
+    /// produced by [`TaskMonitorCore::intervals`]. The item type of this iterator is [`TaskMetrics`],
+    /// which is a bundle of task metrics that describe *only* events occurring within that sampling
+    /// interval.
+    ///
+    /// ##### Examples
+    /// The below example demonstrates construction of [`TaskIntervals`] with [`TaskMonitorCore`].
+    ///
+    /// See [`TaskMonitor::intervals`] for more usage examples.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    ///
+    /// fn main() {
+    ///     let metrics_monitor = Arc::new(tokio_metrics::TaskMonitorCore::new());
+    ///
+    ///     let mut _intervals = tokio_metrics::TaskMonitorCore::intervals(metrics_monitor);
+    /// }
+    /// ```
+    pub fn intervals<Monitor: AsRef<TaskMonitorCore> + Send + Sync + 'static>(
+        monitor: Monitor,
+    ) -> TaskIntervals<Monitor> {
+        let intervals: TaskIntervals<Monitor> = TaskIntervals {
+            monitor,
+            previous: None,
+        };
+
+        intervals
+    }
+}
+
+impl AsRef<TaskMonitorCore> for TaskMonitorCore {
+    fn as_ref(&self) -> &TaskMonitorCore {
+        self
+    }
+}
+
+impl TaskMonitorCore {
+    const fn create(slow_poll_cut_off: Duration, long_delay_cut_off: Duration) -> TaskMonitorCore {
+        TaskMonitorCore {
+            metrics: RawMetrics {
+                slow_poll_threshold: slow_poll_cut_off,
+                first_poll_count: AtomicU64::new(0),
+                total_idled_count: AtomicU64::new(0),
+                total_scheduled_count: AtomicU64::new(0),
+                total_fast_poll_count: AtomicU64::new(0),
+                total_slow_poll_count: AtomicU64::new(0),
+                total_long_delay_count: AtomicU64::new(0),
+                instrumented_count: AtomicU64::new(0),
+                dropped_count: AtomicU64::new(0),
+                total_first_poll_delay_ns: AtomicU64::new(0),
+                total_scheduled_duration_ns: AtomicU64::new(0),
+                local_max_idle_duration_ns: AtomicU64::new(0),
+                global_max_idle_duration_ns: AtomicU64::new(0),
+                total_idle_duration_ns: AtomicU64::new(0),
+                total_fast_poll_duration_ns: AtomicU64::new(0),
+                total_slow_poll_duration: AtomicU64::new(0),
+                total_short_delay_duration_ns: AtomicU64::new(0),
+                long_delay_threshold: long_delay_cut_off,
+                total_short_delay_count: AtomicU64::new(0),
+                total_long_delay_duration_ns: AtomicU64::new(0),
+            },
         }
     }
 }
@@ -1920,6 +2218,12 @@ impl RawMetrics {
 impl Default for TaskMonitor {
     fn default() -> TaskMonitor {
         TaskMonitor::new()
+    }
+}
+
+impl Default for TaskMonitorCore {
+    fn default() -> TaskMonitorCore {
+        TaskMonitorCore::new()
     }
 }
 
@@ -2421,7 +2725,7 @@ derived_metrics!(
     }
 );
 
-impl<T: Future> Future for Instrumented<T> {
+impl<T: Future, M: AsRef<TaskMonitorCore> + Send + Sync + 'static> Future for Instrumented<T, M> {
     type Output = T::Output;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -2437,9 +2741,9 @@ impl<T: Stream> Stream for Instrumented<T> {
     }
 }
 
-fn instrument_poll<T, Out>(
+fn instrument_poll<T, M: AsRef<TaskMonitorCore> + Send + Sync + 'static, Out>(
     cx: &mut Context<'_>,
-    instrumented: Pin<&mut Instrumented<T>>,
+    instrumented: Pin<&mut Instrumented<T, M>>,
     poll_fn: impl FnOnce(Pin<&mut T>, &mut Context<'_>) -> Poll<Out>,
 ) -> Poll<Out> {
     let poll_start = Instant::now();
@@ -2447,7 +2751,7 @@ fn instrument_poll<T, Out>(
     let idled_at = this.idled_at;
     let state = this.state;
     let instrumented_at = state.instrumented_at;
-    let metrics = &state.metrics;
+    let metrics = &state.monitor.as_ref().metrics;
     /* accounting for time-to-first-poll and tasks-count */
     // is this the first time this task has been polled?
     if !*this.did_poll_once {
@@ -2467,7 +2771,7 @@ fn instrument_poll<T, Out>(
         metrics.total_first_poll_delay_ns.fetch_add(elapsed, SeqCst);
 
         /* 3. increment the count of tasks that have been polled at least once */
-        state.metrics.first_poll_count.fetch_add(1, SeqCst);
+        metrics.first_poll_count.fetch_add(1, SeqCst);
     }
     /* accounting for time-idled and time-scheduled */
     // 1. note (and reset) the instant this task was last awoke
@@ -2563,7 +2867,7 @@ fn instrument_poll<T, Out>(
     ret
 }
 
-impl State {
+impl<M> State<M> {
     fn on_wake(&self) {
         let woke_at: u64 = match self.instrumented_at.elapsed().as_nanos().try_into() {
             Ok(woke_at) => woke_at,
@@ -2578,13 +2882,13 @@ impl State {
     }
 }
 
-impl ArcWake for State {
-    fn wake_by_ref(arc_self: &Arc<State>) {
+impl<M: Send + Sync> ArcWake for State<M> {
+    fn wake_by_ref(arc_self: &Arc<State<M>>) {
         arc_self.on_wake();
         arc_self.waker.wake();
     }
 
-    fn wake(self: Arc<State>) {
+    fn wake(self: Arc<State<M>>) {
         self.on_wake();
         self.waker.wake();
     }
@@ -2594,15 +2898,19 @@ impl ArcWake for State {
 ///
 /// See that method's documentation for more details.
 #[derive(Debug)]
-pub struct TaskIntervals {
-    metrics: Arc<RawMetrics>,
+pub struct TaskIntervals<M: AsRef<TaskMonitorCore> + Send + Sync + 'static = TaskMonitor> {
+    monitor: M,
     previous: Option<TaskMetrics>,
 }
 
-impl TaskIntervals {
+impl<M: AsRef<TaskMonitorCore> + Send + Sync + 'static> TaskIntervals<M> {
     fn probe(&mut self) -> TaskMetrics {
-        let latest = self.metrics.metrics();
-        let local_max_idle_duration = self.metrics.get_and_reset_local_max_idle_duration();
+        let latest = self.monitor.as_ref().metrics.metrics();
+        let local_max_idle_duration = self
+            .monitor
+            .as_ref()
+            .metrics
+            .get_and_reset_local_max_idle_duration();
 
         let next = if let Some(previous) = self.previous {
             TaskMetrics {
@@ -2672,7 +2980,7 @@ impl TaskIntervals {
     }
 }
 
-impl Iterator for TaskIntervals {
+impl<M: AsRef<TaskMonitorCore> + Send + Sync + 'static> Iterator for TaskIntervals<M> {
     type Item = TaskMetrics;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -2700,5 +3008,64 @@ fn mean(d: Duration, count: u64) -> Duration {
         Duration::from_nanos(quotient)
     } else {
         Duration::ZERO
+    }
+}
+
+#[cfg(test)]
+mod inference_tests {
+    use super::*;
+    use std::future::Future;
+    use std::pin::Pin;
+
+    // Type alias — M defaults to TaskMonitor
+    type _BoxedInstrumented = Instrumented<Pin<Box<dyn Future<Output = ()>>>>;
+
+    // Struct field — M defaults to TaskMonitor
+    struct _Wrapper {
+        _fut: Instrumented<Pin<Box<dyn Future<Output = ()>>>>,
+    }
+
+    // Partial type annotation — M defaults to TaskMonitor
+    async fn _partial_annotation(monitor: &TaskMonitor) {
+        let fut: Instrumented<_> = monitor.instrument(async { 42 });
+        fut.await;
+    }
+
+    // Common path — fully inferred from instrument()'s return type
+    async fn _common_usage(monitor: &TaskMonitor) {
+        monitor.instrument(async { 42 }).await;
+    }
+
+    // Storing without annotation — both T and M inferred
+    async fn _store_without_annotation(monitor: &TaskMonitor) {
+        let fut = monitor.instrument(async { 42 });
+        fut.await;
+    }
+
+    // Function boundary — M defaults to TaskMonitor in the signature
+    async fn _function_boundary(fut: Instrumented<impl Future<Output = i32>>) -> i32 {
+        fut.await
+    }
+
+    // Return position — M defaults to TaskMonitor
+    fn _return_position(monitor: &TaskMonitor) -> Instrumented<impl Future<Output = i32> + '_> {
+        monitor.instrument(async { 42 })
+    }
+
+    // intervals() inference
+    fn _intervals_inference(monitor: &TaskMonitor) {
+        let mut intervals = monitor.intervals();
+        let _: Option<TaskMetrics> = intervals.next();
+    }
+
+    #[tokio::test]
+    async fn inference_compiles() {
+        let monitor = TaskMonitor::new();
+        _partial_annotation(&monitor).await;
+        _common_usage(&monitor).await;
+        _store_without_annotation(&monitor).await;
+        _function_boundary(monitor.instrument(async { 42 })).await;
+        _return_position(&monitor).await;
+        _intervals_inference(&monitor);
     }
 }

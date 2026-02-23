@@ -1,28 +1,48 @@
 use std::time::Duration;
+use tokio_metrics::{TaskMonitor, TaskMonitorCore};
+
+/// It's usually the right choice to use a static [`tokio_metrics::TaskMonitorCore`].
+///
+/// If you need to dynamically generate task monitors at runtime,
+/// [`tokio_metrics::TaskMonitor`] will be more ergonomic.
+///
+/// See the [`tokio_metrics::TaskMonitorCore`] documentation for more discussion.
+static STATIC_MONITOR: TaskMonitorCore = TaskMonitorCore::new();
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let metrics_monitor = tokio_metrics::TaskMonitor::new();
+    // spawn a task that prints out from the static monitor on a loop
+    tokio::spawn(async {
+        for deltas in TaskMonitorCore::intervals(&STATIC_MONITOR) {
+            // pretty print
+            println!("{deltas:?}");
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    });
 
-    // print task metrics every 500ms
-    {
-        let metrics_monitor = metrics_monitor.clone();
-        tokio::spawn(async move {
-            for deltas in metrics_monitor.intervals() {
-                // pretty-print the metric deltas
-                println!("{deltas:?}");
-                // wait 500ms
-                tokio::time::sleep(Duration::from_millis(500)).await;
-            }
-        });
-    }
-
-    // instrument some tasks and await them
     tokio::join![
-        metrics_monitor.instrument(do_work()),
-        metrics_monitor.instrument(do_work()),
-        metrics_monitor.instrument(do_work())
+        STATIC_MONITOR.instrument(do_work()),
+        STATIC_MONITOR.instrument(do_work()),
+        STATIC_MONITOR.instrument(do_work()),
     ];
+
+    // imagine we wanted to generate a task monitor to keep track of all tasks
+    // and child tasks spawned by a given request
+    for i in 0..5 {
+        // roughly equivalent to Arc::new(TaskMonitorCore::new())
+        let metrics_monitor = TaskMonitor::new();
+
+        // instrument some tasks and await them
+        tokio::join![
+            // roughly equivalent to TaskMonitorCore::instrument_with(do_work(), metrics_monitor.clone())
+            metrics_monitor.instrument(do_work()),
+            metrics_monitor.instrument(do_work()),
+            metrics_monitor.instrument(do_work())
+        ];
+
+        let cumulative = metrics_monitor.cumulative();
+        println!("{i}: {cumulative:?}");
+    }
 
     Ok(())
 }
